@@ -1,0 +1,198 @@
+package com.codegym;
+
+import java.io.IOException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.List;
+import javax.servlet.ServletException;
+import javax.servlet.annotation.WebServlet;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+public class MainApp {
+
+    // =========================================================================
+    // MODEL CLASS: User
+    // =========================================================================
+    public static class User {
+        private int id;
+        private String name;
+        private String email;
+        private String country;
+
+        public User() {}
+
+        public User(String name, String email, String country) {
+            this.name = name;
+            this.email = email;
+            this.country = country;
+        }
+
+        public User(int id, String name, String email, String country) {
+            this.id = id;
+            this.name = name;
+            this.email = email;
+            this.country = country;
+        }
+
+        public int getId() { return id; }
+        public void setId(int id) { this.id = id; }
+
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
+
+        public String getEmail() { return email; }
+        public void setEmail(String email) { this.email = email; }
+
+        public String getCountry() { return country; }
+        public void setCountry(String country) { this.country = country; }
+    }
+
+    // =========================================================================
+    // DAO INTERFACE: IUserDAO
+    // =========================================================================
+    public interface IUserDAO {
+        void addUserTransaction(User user, int[] permissionIds) throws SQLException;
+    }
+
+    // =========================================================================
+    // DAO IMPLEMENTATION: UserDAO
+    // =========================================================================
+    public static class UserDAO implements IUserDAO {
+        private String jdbcURL = "jdbc:mysql://localhost:3306/demo?useSSL=false";
+        private String jdbcUsername = "root";
+        private String jdbcPassword = "123456";
+
+        protected Connection getConnection() {
+            Connection connection = null;
+            try {
+                Class.forName("com.mysql.cj.jdbc.Driver");
+                connection = DriverManager.getConnection(jdbcURL, jdbcUsername, jdbcPassword);
+            } catch (SQLException | ClassNotFoundException e) {
+                e.printStackTrace();
+            }
+            return connection;
+        }
+
+        // Triển khai phương thức Transaction cố tình sinh lỗi SQL
+        @Override
+        public void addUserTransaction(User user, int[] permissionIds) throws SQLException {
+            Connection connection = null;
+            PreparedStatement pstmtUser = null;
+            PreparedStatement pstmtAssignment = null;
+            ResultSet rs = null;
+
+            try {
+                connection = getConnection();
+
+                // 1. Tắt chế độ Auto-commit để bắt đầu Transaction Block
+                connection.setAutoCommit(false);
+
+                // 2. Chèn dữ liệu thành công vào bảng users
+                String insertUserSql = "INSERT INTO users (name, email, country) VALUES (?, ?, ?)";
+                pstmtUser = connection.prepareStatement(insertUserSql, Statement.RETURN_GENERATED_KEYS);
+                pstmtUser.setString(1, user.getName());
+                pstmtUser.setString(2, user.getEmail());
+                pstmtUser.setString(3, user.getCountry());
+                
+                int rowAffected = pstmtUser.executeUpdate();
+                System.out.println("Thêm thành công user vào bảng 'users'. Đang chờ commit...");
+
+                // 3. Lấy ID của user vừa được tạo
+                rs = pstmtUser.getGeneratedKeys();
+                int userId = 0;
+                if (rs.next()) {
+                    userId = rs.getInt(1);
+                }
+
+                // 4. CỐ TÌNH TẠO LỖI SQL tại bước gán quyền (user_permission)
+                if (permissionIds != null && permissionIds.length > 0) {
+                    // CỐ TÌNH VIẾT SAI TÊN BẢNG HOẶC TÊN CỘT ĐỂ ÉP BÁO LỖI SQLEXCEPTION
+                    // Viết sai tên bảng thành 'invalid_table'
+                    String insertPermissionSql = "INSERT INTO invalid_table (user_id, permission_id) VALUES (?, ?)";
+                    pstmtAssignment = connection.prepareStatement(insertPermissionSql);
+
+                    for (int permissionId : permissionIds) {
+                        pstmtAssignment.setInt(1, userId);
+                        pstmtAssignment.setInt(2, permissionId);
+                        pstmtAssignment.executeUpdate(); // <-- Sẽ ném SQLException tại đây!
+                    }
+                }
+
+                // 5. Nếu không có lỗi, tiến hành commit (dòng này sẽ KHÔNG bao giờ được chạy)
+                connection.commit();
+                System.out.println("Transaction commit thành công!");
+
+            } catch (SQLException e) {
+                // 6. Xử lý khi bắt được lỗi SQL: Tiến hành Rollback
+                try {
+                    if (connection != null) {
+                        connection.rollback();
+                        System.out.println("-> CẢNH BÁO: Đã bắt được lỗi SQL! Transaction đã Rollback toàn bộ dữ liệu.");
+                    }
+                } catch (SQLException ex) {
+                    ex.printStackTrace();
+                }
+                e.printStackTrace();
+            } finally {
+                // 7. Giải phóng tài nguyên và bật lại Auto-commit
+                try {
+                    if (rs != null) rs.close();
+                    if (pstmtUser != null) pstmtUser.close();
+                    if (pstmtAssignment != null) pstmtAssignment.close();
+                    if (connection != null) {
+                        connection.setAutoCommit(true);
+                        connection.close();
+                    }
+                } catch (SQLException ex) {
+                    ex.printStackTrace();
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // CONTROLLER: UserServlet
+    // =========================================================================
+    @WebServlet(name = "UserServlet", urlPatterns = "/users")
+    public static class UserServlet extends HttpServlet {
+        private static final long serialVersionUID = 1L;
+        private IUserDAO userDAO;
+
+        public void init() {
+            userDAO = new UserDAO();
+        }
+
+        protected void doGet(HttpServletRequest request, HttpServletResponse response)
+                throws ServletException, IOException {
+            String action = request.getParameter("action");
+            if ("test-rollback".equals(action)) {
+                testRollback(request, response);
+            }
+        }
+
+        private void testRollback(HttpServletRequest request, HttpServletResponse response) 
+                throws ServletException, IOException {
+            // Tạo mock dữ liệu để test
+            User newUser = new User("Test Rollback User", "rollback@gmail.com", "VN");
+            int[] permissions = {1, 2}; // Gán quyền 1 và 2
+
+            try {
+                // Gọi hàm thử nghiệm Transaction gây lỗi
+                userDAO.addUserTransaction(newUser, permissions);
+
+                response.setContentType("text/html;charset=UTF-8");
+                response.getWriter().println("<h3>Đã thực thi hàm addUserTransaction() có lỗi cố tính!</h3>");
+                response.getWriter().println("<p>Hãy kiểm tra Terminal Console để xem log Rollback và kiểm tra MySQL xem User có bị ghi nhận rác không.</p>");
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+}
